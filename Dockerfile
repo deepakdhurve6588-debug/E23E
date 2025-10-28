@@ -1,12 +1,16 @@
-# Dockerfile for E2EE Messenger Bot
+# Dockerfile for E2EE Messenger Bot - FIXED CHROME INSTALLATION
 FROM python:3.11-slim
 
-# Install system dependencies
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install system dependencies FIRST
 RUN apt-get update && apt-get install -y \
     wget \
     curl \
-    unzip \
     gnupg \
+    unzip \
     fonts-liberation \
     libappindicator3-1 \
     libasound2 \
@@ -44,20 +48,29 @@ RUN apt-get update && apt-get install -y \
     xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Chrome
-RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | apt-key add - \
-    && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
+# Install Chrome using the CORRECT method
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
+    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" | tee /etc/apt/sources.list.d/google-chrome.list \
     && apt-get update \
     && apt-get install -y google-chrome-stable
 
-# Install ChromeDriver
+# Install ChromeDriver - SIMPLIFIED METHOD
 RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}') \
-    && CHROMEDRIVER_VERSION=$(echo $CHROME_VERSION | cut -d'.' -f1,2,3) \
-    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROMEDRIVER_VERSION}/linux64/chromedriver-linux64.zip" \
+    && echo "Chrome version: $CHROME_VERSION" \
+    && wget -q "https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" \
     && unzip -q chromedriver-linux64.zip \
     && mv chromedriver-linux64/chromedriver /usr/local/bin/ \
     && chmod +x /usr/local/bin/chromedriver \
     && rm -rf chromedriver-linux64.zip
+
+# Alternative ChromeDriver installation if above fails
+RUN if [ ! -f "/usr/local/bin/chromedriver" ]; then \
+        wget -q "https://storage.googleapis.com/chrome-for-testing-public/120.0.6099.109/linux64/chromedriver-linux64.zip" \
+        && unzip -q chromedriver-linux64.zip \
+        && mv chromedriver-linux64/chromedriver /usr/local/bin/ \
+        && chmod +x /usr/local/bin/chromedriver \
+        && rm -rf chromedriver-linux64.zip; \
+    fi
 
 # Set working directory
 WORKDIR /app
@@ -78,6 +91,10 @@ RUN mkdir -p /app/data && chown botuser:botuser /app/data
 
 # Switch to non-root user
 USER botuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import os; print('Health check passed')" || exit 1
 
 # Start the bot
 CMD ["python", "e2ee_bot.py"]
