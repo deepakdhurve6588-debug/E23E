@@ -1,18 +1,13 @@
 {
   "name": "fb-cookie-bot",
   "version": "1.0.0",
+  "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
     "@sparticuz/chromium": "^119.0.0",
     "puppeteer-core": "^23.3.0",
-    "puppeteer": "^23.3.0",
     "express": "^4.19.2",
     "node-fetch": "^3.3.2"
-  },
-  "engines": {
-    "node": ">=18.x"
   }
 }
