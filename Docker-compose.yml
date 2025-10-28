@@ -2,7 +2,9 @@ version: '3.8'
 
 services:
   e2ee-messenger-bot:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
     container_name: e2ee-messenger-bot
     restart: unless-stopped
     volumes:
@@ -12,27 +14,9 @@ services:
       - PYTHONUNBUFFERED=1
     stdin_open: true
     tty: true
-
-  # For monitoring and management
-  bot-monitor:
-    image: python:3.11-slim
-    container_name: bot-monitor
-    restart: unless-stopped
-    volumes:
-      - ./data:/app/data:ro
-    command: >
-      sh -c "pip install requests && 
-      python -c '
-      import time, requests, os
-      while True:
-          try:
-              print(\"📊 Bot Monitor Running...\")
-              if os.path.exists(\"/app/data/messages.txt\"):
-                  with open(\"/app/data/messages.txt\", \"r\") as f:
-                      lines = len(f.readlines())
-                  print(f\"📨 Messages in queue: {lines}\")
-              time.sleep(30)
-          except Exception as e:
-              print(f\"Monitor error: {e}\")
-              time.sleep(10)
-      '"
+    healthcheck:
+      test: ["CMD", "python", "-c", "print('healthy')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
