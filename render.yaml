@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: fb-sender-bot
+    env: node
+    plan: free
+    buildCommand: "npm install"
+    startCommand: "node server.js"
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
