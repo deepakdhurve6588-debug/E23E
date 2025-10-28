@@ -8,7 +8,6 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const KEEPALIVE_INTERVAL = 60 * 1000;
 
-// Load config files
 const cookies = JSON.parse(fs.readFileSync("cookie.json", "utf8"));
 const threads = fs.readFileSync("Tid.txt", "utf8").split(/\r?\n/).filter(Boolean);
 const messages = fs.readFileSync("msg.txt", "utf8").split(/\r?\n/).filter(Boolean);
@@ -21,24 +20,54 @@ app.get("/", (req, res) => res.send("✅ FB Cookie Bot Running"));
 app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
 app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
 
-// Auto ping every minute
 setInterval(() => {
   fetch(`http://localhost:${PORT}/health`).catch(() => {});
 }, KEEPALIVE_INTERVAL);
 
-// Sleep helper
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Safer navigation retry
 async function safeGoto(page, url) {
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 90000 });
   } catch (err) {
-    console.log(`⚠️ Navigation error: ${err.message}. Retrying...`);
-    await sleep(3000);
+    console.log(`⚠️ Navigation error: ${err.message}. Retrying in 5s...`);
+    await sleep(5000);
     await safeGoto(page, url);
+  }
+}
+
+async function findMessageBox(page) {
+  try {
+    // Try normal selector first
+    let el = await page.$('div[contenteditable="true"]');
+    if (el) return el;
+
+    // Try inside iframe if E2EE uses one
+    const frames = page.frames();
+    for (const frame of frames) {
+      el = await frame.$('div[contenteditable="true"]');
+      if (el) return el;
+    }
+
+    // Try shadow DOM search
+    const handle = await page.evaluateHandle(() => {
+      const walker = document.createTreeWalker(document, NodeFilter.SHOW_ELEMENT);
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.shadowRoot) {
+          const inner = node.shadowRoot.querySelector('div[contenteditable="true"]');
+          if (inner) return inner;
+        }
+      }
+      return null;
+    });
+    if (handle) return handle.asElement();
+
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -46,7 +75,14 @@ async function startBot() {
   console.log("🚀 Launching Puppeteer...");
 
   const browser = await puppeteer.launch({
-    args: chromium.args,
+    args: [
+      ...chromium.args,
+      "--no-sandbox",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--disable-setuid-sandbox",
+      "--disable-extensions"
+    ],
     defaultViewport: chromium.defaultViewport,
     executablePath: await chromium.executablePath(),
     headless: chromium.headless,
@@ -65,31 +101,40 @@ async function startBot() {
   await safeGoto(page, "https://facebook.com");
   await sleep(5000);
 
-  // Send loop
   for (const tid of threads) {
     while (true) {
-      console.log(`💬 Opening thread ${tid}`);
-      await safeGoto(page, `${BASE_URL}${tid}`);
-      await sleep(4000);
+      try {
+        console.log(`💬 Opening thread ${tid}`);
+        await safeGoto(page, `${BASE_URL}${tid}`);
+        await sleep(7000);
 
-      const input = await page.$('div[contenteditable="true"]');
-      if (!input) {
-        console.log(`⚠️ Message input not found for thread ${tid}`);
+        let input = await findMessageBox(page);
+        if (!input) {
+          console.log(`⚠️ Message input not found, retrying after refresh...`);
+          await page.reload({ waitUntil: "domcontentloaded" });
+          await sleep(7000);
+          input = await findMessageBox(page);
+          if (!input) {
+            console.log(`❌ Still no message box, skipping thread temporarily...`);
+            continue;
+          }
+        }
+
+        for (const msg of messages) {
+          const text = prefix + msg;
+          await input.focus();
+          await page.keyboard.type(text, { delay: 30 });
+          await page.keyboard.press("Enter");
+          console.log(`📨 Sent: ${text}`);
+          await sleep(delay);
+        }
+
+        console.log(`🔁 Completed cycle for thread ${tid}. Repeating...`);
+        await sleep(4000);
+      } catch (err) {
+        console.log(`⚠️ Error in thread ${tid}: ${err.message}`);
         await sleep(5000);
-        continue;
       }
-
-      for (const msg of messages) {
-        const text = prefix + msg;
-        await input.focus();
-        await page.keyboard.type(text, { delay: 40 });
-        await page.keyboard.press("Enter");
-        console.log(`📨 Sent: ${text}`);
-        await sleep(delay);
-      }
-
-      console.log(`🔁 All messages done for ${tid}. Repeating cycle...`);
-      await sleep(3000); // short pause before restarting message loop
     }
   }
 }
