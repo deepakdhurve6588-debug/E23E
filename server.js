@@ -8,6 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 const KEEPALIVE_INTERVAL = 60 * 1000;
 
+// Load config files
 const cookies = JSON.parse(fs.readFileSync("cookie.json", "utf8"));
 const threads = fs.readFileSync("Tid.txt", "utf8").split(/\r?\n/).filter(Boolean);
 const messages = fs.readFileSync("msg.txt", "utf8").split(/\r?\n/).filter(Boolean);
@@ -18,16 +19,19 @@ const BASE_URL = "https://www.facebook.com/messages/e2ee/t/";
 
 app.get("/", (req, res) => res.send("✅ FB Cookie Bot Running"));
 app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
-app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
+app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
 
+// Auto ping every minute
 setInterval(() => {
   fetch(`http://localhost:${PORT}/health`).catch(() => {});
 }, KEEPALIVE_INTERVAL);
 
+// Sleep helper
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Safer navigation retry
 async function safeGoto(page, url) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -59,12 +63,14 @@ async function startBot() {
   for (const c of cookies) await page.setCookie(c);
   console.log("🍪 Cookies loaded, refreshing...");
   await safeGoto(page, "https://facebook.com");
+  await sleep(5000);
 
+  // Send loop
   for (const tid of threads) {
     while (true) {
       console.log(`💬 Opening thread ${tid}`);
       await safeGoto(page, `${BASE_URL}${tid}`);
-      await sleep(5000);
+      await sleep(4000);
 
       const input = await page.$('div[contenteditable="true"]');
       if (!input) {
@@ -82,7 +88,8 @@ async function startBot() {
         await sleep(delay);
       }
 
-      console.log(`🔁 All messages done for ${tid}. Repeating...`);
+      console.log(`🔁 All messages done for ${tid}. Repeating cycle...`);
+      await sleep(3000); // short pause before restarting message loop
     }
   }
 }
