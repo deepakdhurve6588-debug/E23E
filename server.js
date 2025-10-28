@@ -24,12 +24,16 @@ setInterval(() => {
   fetch(`http://localhost:${PORT}/health`).catch(() => {});
 }, KEEPALIVE_INTERVAL);
 
+async function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 async function safeGoto(page, url) {
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
   } catch (err) {
     console.log(`⚠️ Navigation error: ${err.message}. Retrying...`);
-    await page.waitForTimeout(3000);
+    await sleep(3000);
     await safeGoto(page, url);
   }
 }
@@ -46,8 +50,8 @@ async function startBot() {
   });
 
   const page = await browser.newPage();
-  await page.setDefaultNavigationTimeout(0);
-  await page.setDefaultTimeout(0);
+  page.setDefaultNavigationTimeout(0);
+  page.setDefaultTimeout(0);
 
   console.log("🌐 Opening Facebook...");
   await safeGoto(page, "https://facebook.com");
@@ -60,11 +64,12 @@ async function startBot() {
     while (true) {
       console.log(`💬 Opening thread ${tid}`);
       await safeGoto(page, `${BASE_URL}${tid}`);
-      await page.waitForTimeout(5000);
+      await sleep(5000);
 
       const input = await page.$('div[contenteditable="true"]');
       if (!input) {
         console.log(`⚠️ Message input not found for thread ${tid}`);
+        await sleep(5000);
         continue;
       }
 
@@ -74,7 +79,7 @@ async function startBot() {
         await page.keyboard.type(text, { delay: 40 });
         await page.keyboard.press("Enter");
         console.log(`📨 Sent: ${text}`);
-        await page.waitForTimeout(delay);
+        await sleep(delay);
       }
 
       console.log(`🔁 All messages done for ${tid}. Repeating...`);
