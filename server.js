@@ -6,29 +6,36 @@ import puppeteer from "puppeteer-core";
 
 const app = express();
 const PORT = process.env.PORT || 10000;
-const KEEPALIVE_INTERVAL = 60 * 1000; // 1 minute
+const KEEPALIVE_INTERVAL = 60 * 1000;
 
-// Load files
 const cookies = JSON.parse(fs.readFileSync("cookie.json", "utf8"));
 const threads = fs.readFileSync("Tid.txt", "utf8").split(/\r?\n/).filter(Boolean);
 const messages = fs.readFileSync("msg.txt", "utf8").split(/\r?\n/).filter(Boolean);
 const prefix = fs.existsSync("prefix.txt") ? fs.readFileSync("prefix.txt", "utf8").trim() : "";
-const delay = fs.existsSync("delay.txt") ? parseFloat(fs.readFileSync("delay.txt", "utf8").trim()) * 1000 : 2000;
+const delay = fs.existsSync("delay.txt") ? parseFloat(fs.readFileSync("delay.txt", "utf8").trim()) * 1000 : 3000;
 
 const BASE_URL = "https://www.facebook.com/messages/e2ee/t/";
 
-app.get("/", (req, res) => res.send("✅ FB Cookie Bot is Running"));
+app.get("/", (req, res) => res.send("✅ FB Cookie Bot Running"));
 app.get("/health", (req, res) => res.json({ status: "ok", uptime: process.uptime() }));
+app.listen(PORT, () => console.log(`Server started on port ${PORT}`));
 
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
-
-// Keepalive ping (Render auto sleep रोकने के लिए)
 setInterval(() => {
   fetch(`http://localhost:${PORT}/health`).catch(() => {});
 }, KEEPALIVE_INTERVAL);
 
+async function safeGoto(page, url) {
+  try {
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+  } catch (err) {
+    console.log(`⚠️ Navigation error: ${err.message}. Retrying...`);
+    await page.waitForTimeout(3000);
+    await safeGoto(page, url);
+  }
+}
+
 async function startBot() {
-  console.log("🚀 Launching Puppeteer with Chromium...");
+  console.log("🚀 Launching Puppeteer...");
 
   const browser = await puppeteer.launch({
     args: chromium.args,
@@ -39,40 +46,40 @@ async function startBot() {
   });
 
   const page = await browser.newPage();
+  await page.setDefaultNavigationTimeout(0);
+  await page.setDefaultTimeout(0);
 
-  // Load cookies for Facebook
-  await page.goto("https://facebook.com", { waitUntil: "networkidle2" });
-  for (const c of cookies) {
-    await page.setCookie(c);
-  }
-  await page.reload({ waitUntil: "networkidle2" });
-  console.log("✅ Logged in using cookies.");
+  console.log("🌐 Opening Facebook...");
+  await safeGoto(page, "https://facebook.com");
 
-  // Loop through thread IDs
-  while (true) {
-    for (const tid of threads) {
-      console.log(`💬 Opening thread: ${tid}`);
-      await page.goto(`${BASE_URL}${tid}`, { waitUntil: "networkidle2" });
-      await page.waitForTimeout(4000);
+  for (const c of cookies) await page.setCookie(c);
+  console.log("🍪 Cookies loaded, refreshing...");
+  await safeGoto(page, "https://facebook.com");
+
+  for (const tid of threads) {
+    while (true) {
+      console.log(`💬 Opening thread ${tid}`);
+      await safeGoto(page, `${BASE_URL}${tid}`);
+      await page.waitForTimeout(5000);
 
       const input = await page.$('div[contenteditable="true"]');
       if (!input) {
-        console.log(`[⚠️] Message box not found for ${tid}`);
+        console.log(`⚠️ Message input not found for thread ${tid}`);
         continue;
       }
 
       for (const msg of messages) {
         const text = prefix + msg;
         await input.focus();
-        await page.keyboard.type(text, { delay: 50 });
+        await page.keyboard.type(text, { delay: 40 });
         await page.keyboard.press("Enter");
-        console.log(`📤 Sent: ${text}`);
+        console.log(`📨 Sent: ${text}`);
         await page.waitForTimeout(delay);
       }
 
-      console.log(`🔁 Completed all messages for ${tid}, repeating...`);
+      console.log(`🔁 All messages done for ${tid}. Repeating...`);
     }
   }
 }
 
-startBot().catch((err) => console.error("❌ Error:", err));
+startBot().catch(err => console.error("❌ Bot crashed:", err));
