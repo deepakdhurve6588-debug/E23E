@@ -1,8 +1,9 @@
-// fast_e2ee_sender_no_fallback.js
-// CommonJS: node fast_e2ee_sender_no_fallback.js
-// Dependencies: puppeteer-core, @sparticuz/chromium, node-fetch, express
+// fast_e2ee_sender_debug.js
+// CommonJS — run: node fast_e2ee_sender_debug.js
+// deps: puppeteer-core, @sparticuz/chromium, node-fetch, express, fs-extra (optional)
 
 const fs = require('fs');
+const path = require('path');
 const fetch = require('node-fetch');
 const chromium = require('@sparticuz/chromium');
 const puppeteer = require('puppeteer-core');
@@ -15,10 +16,7 @@ const KEEPALIVE_INTERVAL_MS = 60 * 1000;
 app.get('/', (req, res) => res.send('OK'));
 app.get('/health', (req, res) => res.json({ ok: true, ts: new Date().toISOString() }));
 app.listen(PORT, () => console.log(`Health server on :${PORT}`));
-setInterval(() => {
-  // adjust to your external URL if needed on Render
-  fetch(`http://localhost:${PORT}/health`).catch(() => {});
-}, KEEPALIVE_INTERVAL_MS);
+setInterval(() => fetch(`http://localhost:${PORT}/health`).catch(() => {}), KEEPALIVE_INTERVAL_MS);
 
 // --------- Config & files ----------
 const COOKIES_FILE = fs.existsSync('cookies.json') ? 'cookies.json' : 'cookie.json';
@@ -39,6 +37,10 @@ const MIN_DELAY_MS = (fs.existsSync('delay.txt') ? parseInt(readLines('delay.txt
 
 if (THREADS.length === 0) { console.error('Tid.txt empty'); process.exit(1); }
 if (MESSAGES.length === 0) { console.error('msg.txt empty'); process.exit(1); }
+
+// ensure screenshots folder
+const SS_DIR = path.resolve('./screenshots');
+if (!fs.existsSync(SS_DIR)) fs.mkdirSync(SS_DIR, { recursive: true });
 
 // --------- Helpers ----------
 const sleep = ms => new Promise(res => setTimeout(res, ms));
@@ -64,59 +66,135 @@ async function safeGoto(page, url) {
   throw new Error('navigation_failed');
 }
 
-/**
- * Fast insert + send for E2EE editors.
- * Tries known contenteditable selectors on page and frames.
- * Returns true on success.
- */
-async function fastInsertAndSend(page, text) {
-  const candidateSelectors = [
+// Find element handle (page or frames) - returns {context, handle, selectorUsed}
+async function locateEditable(page) {
+  const selectors = [
     'div[aria-label="Message"][contenteditable="true"]',
     'div[role="textbox"][contenteditable="true"]',
     'div[contenteditable="true"][data-lexical-text="true"]',
     'div[contenteditable="true"]:not([aria-hidden="true"])'
   ];
 
-  async function tryInContext(context) {
-    for (const sel of candidateSelectors) {
+  // try page
+  for (const sel of selectors) {
+    try {
+      const handle = await page.$(sel);
+      if (handle) return { context: page, handle, selector: sel };
+    } catch {}
+  }
+
+  // try frames
+  for (const frame of page.frames()) {
+    for (const sel of selectors) {
       try {
-        const el = await context.$(sel);
-        if (!el) continue;
-
-        const ok = await context.evaluate((element, message) => {
-          try {
-            element.focus();
-            if (document.execCommand) {
-              document.execCommand('insertText', false, message);
-            } else {
-              element.textContent = message;
-              element.dispatchEvent(new Event('input', { bubbles: true }));
-            }
-            element.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
-            return true;
-          } catch (e) {
-            return false;
-          }
-        }, el, text);
-
-        if (ok) {
-          await context.keyboard.press('Enter');
-          return true;
-        }
-      } catch (e) {
-        // ignore and continue
-      }
+        const handle = await frame.$(sel);
+        if (handle) return { context: frame, handle, selector: sel };
+      } catch {}
     }
-    return false;
   }
+  return null;
+}
 
-  if (await tryInContext(page)) return true;
-
-  const frames = page.frames();
-  for (const f of frames) {
-    if (await tryInContext(f)) return true;
-  }
+// Send method 1: document.execCommand('insertText')
+// returns true if success
+async function methodExecInsert(context, handle, text) {
+  try {
+    const ok = await context.evaluate((el, msg) => {
+      try {
+        el.focus();
+        if (document.execCommand) {
+          document.execCommand('insertText', false, msg);
+        } else {
+          el.textContent = msg;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }, handle, text);
+    if (ok) {
+      await context.keyboard.press('Enter');
+      return true;
+    }
+  } catch (e) {}
   return false;
+}
+
+// Send method 2: set innerText + dispatch input & keypress
+async function methodSetInner(context, handle, text) {
+  try {
+    const ok = await context.evaluate((el, msg) => {
+      try {
+        el.focus();
+        // Set via innerText or textContent depending on node
+        if ('innerText' in el) el.innerText = msg;
+        else el.textContent = msg;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('keyup', { bubbles: true }));
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }, handle, text);
+    if (ok) {
+      await context.keyboard.press('Enter');
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
+// Send method 3: keyboard.type (slowest fallback)
+async function methodKeyboardType(context, handle, text) {
+  try {
+    await handle.focus();
+    await context.keyboard.type(text, { delay: 20 });
+    await context.keyboard.press('Enter');
+    return true;
+  } catch (e) {}
+  return false;
+}
+
+async function fastInsertAndSendWithDiagnostics(page, text, threadId, msgIndex) {
+  // locate fresh handle each time
+  const found = await locateEditable(page);
+  if (!found) {
+    console.log('No editable element found (locateEditable returned null).');
+    return { ok: false, reason: 'no_input' };
+  }
+
+  const { context, handle, selector } = found;
+  console.log(`Found input using selector: ${selector} (context=${context.url ? 'page' : 'frame'})`);
+
+  // Try methods in order
+  const methods = [
+    { fn: methodExecInsert, name: 'execInsert' },
+    { fn: methodSetInner, name: 'setInner' },
+    { fn: methodKeyboardType, name: 'keyboardType' },
+  ];
+
+  for (const m of methods) {
+    try {
+      const start = Date.now();
+      const ok = await m.fn(context, handle, text);
+      const took = Date.now() - start;
+      console.log(`Tried ${m.name} — success=${ok} (took ${took}ms)`);
+      if (ok) return { ok: true, method: m.name };
+    } catch (e) {
+      console.log(`Method ${m.name} threw:`, e.message || e);
+    }
+  }
+
+  // If none succeeded — screenshot for debugging
+  const ssPath = path.join(SS_DIR, `fail_${threadId}_msg${msgIndex}_${Date.now()}.png`);
+  try {
+    await page.screenshot({ path: ssPath, fullPage: false });
+    console.log('Saved screenshot to', ssPath);
+  } catch (e) { console.warn('Screenshot failed:', e.message); }
+
+  return { ok: false, reason: 'all_methods_failed' };
 }
 
 // --------- Main -------
@@ -144,43 +222,38 @@ async function fastInsertAndSend(page, text) {
   }
   console.log('Cookies set; refreshing session...');
   await safeGoto(page, 'https://facebook.com');
-  await sleep(4000);
+  await sleep(3000);
 
-  // process threads (E2EE only — NO fallback)
   for (const tid of THREADS) {
     console.log('--- THREAD:', tid, '---');
     let attempts = 0;
     while (true) {
       try {
-        // warm up messenger
-        await safeGoto(page, 'https://www.facebook.com/messages');
-        await sleep(1500);
-
-        // OPEN E2EE THREAD ONLY
         await safeGoto(page, `https://www.facebook.com/messages/e2ee/t/${tid}`);
         await sleep(1200);
 
-        // Send each message quickly — NO non-E2EE fallback
-        for (const raw of MESSAGES) {
-          const msg = (PREFIX ? PREFIX + ' ' : '') + raw;
-          const sent = await fastInsertAndSend(page, msg);
-          if (!sent) {
-            throw new Error('message_send_failed_e2ee_only');
-          }
-          await sleep(Math.max(Number(MIN_DELAY_MS) || MIN_DELAY_MS, 50));
+        // send each message
+        for (let i = 0; i < MESSAGES.length; i++) {
+          const raw = MESSAGES[i];
+          const msg = (PREFIX ? (PREFIX + ' ' + raw) : raw);
+          console.log(`Sending to ${tid} message[${i}]: ${msg.slice(0,120)}`);
+          const res = await fastInsertAndSendWithDiagnostics(page, msg, tid, i);
+          if (!res.ok) throw new Error(`send_failed:${res.reason}`);
+          // small delay
+          await sleep(Math.max(MIN_DELAY_MS, 100));
         }
 
         console.log(`All messages for ${tid} sent.`);
-        break; // move to next thread
+        break;
       } catch (err) {
         attempts++;
         console.warn('Thread send error:', err.message, `attempt ${attempts}`);
         if (err.message && err.message.includes('detached')) {
-          console.log('Page/frame detached, recreating tab...');
+          console.log('Page/frame detached, recreating page...');
           try {
             page = await browser.newPage();
             for (const c of cookies) await page.setCookie(c);
-          } catch (e) { console.warn('Recreate tab failed', e.message); }
+          } catch (e) { console.warn('Recreate page failed', e.message); }
         }
         if (attempts >= 4) {
           console.warn('Skipping thread after repeated failures:', tid);
@@ -191,6 +264,5 @@ async function fastInsertAndSend(page, text) {
     } // end while per thread
   } // end for threads
 
-  console.log('All threads processed. Keeping browser open for inspection.');
-  // browser left open intentionally
+  console.log('Done. Browser left open for inspection.');
 })();
