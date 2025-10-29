@@ -1,124 +1,66 @@
-import fs from "fs";
 import express from "express";
-import fetch from "node-fetch";
-import chromium from "@sparticuz/chromium";
+import fs from "fs";
 import puppeteer from "puppeteer-core";
+import chromium from "@sparticuz/chromium";
 
+const PORT = process.env.PORT || 3000;
 const app = express();
-const PORT = process.env.PORT || 10000;
-const KEEPALIVE_INTERVAL = 60 * 1000;
 
-const cookies = JSON.parse(fs.readFileSync("cookie.json", "utf8"));
-const threads = fs.readFileSync("Tid.txt", "utf8").split(/\r?\n/).filter(Boolean);
-const messages = fs.readFileSync("msg.txt", "utf8").split(/\r?\n/).filter(Boolean);
-const prefix = fs.existsSync("prefix.txt") ? fs.readFileSync("prefix.txt", "utf8").trim() : "";
-const delay = fs.existsSync("delay.txt") ? parseFloat(fs.readFileSync("delay.txt", "utf8").trim()) * 1000 : 3000;
+// Ping route for Render
+app.get("/", (req, res) => res.send("✅ FB E2EE Bot running..."));
 
-const BASE_URL = "https://www.facebook.com/messages/e2ee/t/";
+// Read configs
+const cookies = JSON.parse(fs.readFileSync("./cookie.json", "utf-8"));
+const threadIds = fs.readFileSync("./tid.txt", "utf-8").split("\n").filter(Boolean);
+const messages = fs.readFileSync("./msg.txt", "utf-8").split("\n").filter(Boolean);
+const delay = parseInt(fs.readFileSync("./delay.txt", "utf-8").trim()) || 10_000;
 
-app.get("/", (_, res) => res.send("✅ FB Cookie Bot Running"));
-app.get("/health", (_, res) => res.json({ status: "ok", uptime: process.uptime() }));
-app.listen(PORT, () => console.log(`✅ Server started on port ${PORT}`));
-setInterval(() => fetch(`http://localhost:${PORT}/health`).catch(() => {}), KEEPALIVE_INTERVAL);
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function safeGoto(page, url) {
-  for (let i = 0; i < 3; i++) {
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
-      return;
-    } catch (err) {
-      if (err.message.includes("detached")) throw new Error("page_detached");
-      console.log(`⚠️ Navigation error: ${err.message}. Retrying in 5s...`);
-      await sleep(5000);
-    }
-  }
-  throw new Error("navigation_failed");
-}
-
-async function findMessageBox(page) {
-  try {
-    let el = await page.$('div[contenteditable="true"]');
-    if (el) return el;
-
-    const frames = page.frames();
-    for (const f of frames) {
-      el = await f.$('div[contenteditable="true"]');
-      if (el) return el;
-    }
-    return null;
-  } catch {
-    return null;
-  }
+async function startBrowser() {
+  const browser = await puppeteer.launch({
+    args: chromium.args,
+    defaultViewport: chromium.defaultViewport,
+    executablePath: await chromium.executablePath(),
+    headless: chromium.headless
+  });
+  return browser;
 }
 
 async function startBot() {
-  console.log("🚀 Launching Puppeteer...");
-  const browser = await puppeteer.launch({
-    args: [
-      ...chromium.args,
-      "--no-sandbox",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--disable-setuid-sandbox",
-      "--disable-extensions"
-    ],
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless,
-  });
-
+  let browser = await startBrowser();
   let page = await browser.newPage();
-  await safeGoto(page, "https://facebook.com");
-  for (const c of cookies) await page.setCookie(c);
-  console.log("🍪 Cookies loaded, refreshing...");
-  await safeGoto(page, "https://facebook.com");
-  await sleep(4000);
 
-  for (const tid of threads) {
-    while (true) {
+  await page.setCookie(...cookies);
+  console.log("🍪 Cookies loaded, opening Messenger...");
+
+  for (;;) {
+    for (const tid of threadIds) {
       try {
         console.log(`💬 Opening thread ${tid}`);
-        await safeGoto(page, `${BASE_URL}${tid}`);
-        await sleep(5000);
-
-        let input = await findMessageBox(page);
-        if (!input) {
-          console.log("⚠️ Input not found, reloading page...");
-          await page.reload({ waitUntil: "domcontentloaded" });
-          await sleep(4000);
-          input = await findMessageBox(page);
-          if (!input) {
-            console.log("❌ Still no input, skipping thread temporarily.");
-            continue;
-          }
-        }
+        await page.goto(`https://www.facebook.com/messages/t/${tid}`, { waitUntil: "networkidle2", timeout: 60000 });
+        await page.waitForSelector('[aria-label="Message"]', { timeout: 60000 });
+        const input = await page.$('[aria-label="Message"]');
 
         for (const msg of messages) {
-          const text = prefix + msg;
-          await input.focus();
-          await page.keyboard.type(text, { delay: 35 });
-          await page.keyboard.press("Enter");
-          console.log(`📨 Sent: ${text}`);
-          await sleep(delay);
+          await input.type(msg);
+          await input.press("Enter");
+          console.log(`✅ Sent: ${msg}`);
+          await page.waitForTimeout(delay);
         }
-
-        console.log(`🔁 Finished messages for ${tid}. Looping again...`);
       } catch (err) {
-        console.log(`⚠️ Error: ${err.message}`);
-        if (err.message.includes("page_detached")) {
-          console.log("🧩 Recreating new tab...");
-          try {
-            page = await browser.newPage();
-            for (const c of cookies) await page.setCookie(c);
-          } catch (e) {
-            console.log("❌ Failed to recreate page:", e.message);
-          }
+        console.warn(`⚠️ Navigation error: ${err.message}`);
+        try {
+          page = await browser.newPage();
+        } catch {
+          console.log("🧩 Restarting browser...");
+          await browser.close().catch(() => {});
+          browser = await startBrowser();
+          page = await browser.newPage();
+          await page.setCookie(...cookies);
         }
-        await sleep(5000);
       }
     }
   }
 }
 
-startBot().catch((e) => console.error("❌ Bot crashed:", e));
+startBot();
+app.listen(PORT, () => console.log(`🌐 Server running on ${PORT}`));
